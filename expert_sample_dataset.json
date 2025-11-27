@@ -1,0 +1,47 @@
+[
+    {
+        "id": "exp_01",
+        "label": "expert",
+        "sequence": [
+            "Lead_II",
+            "Lead_I",
+            "Lead_II",
+            "Lead_III",
+            "aVR",
+            "aVL",
+            "aVF",
+            "V1",
+            "V2",
+            "V3",
+            "V4",
+            "V5",
+            "V6",
+            "Lead_II",
+            "V3",
+            "V4",
+            "V5",
+            "V6"
+        ],
+        "durations_ms": [
+            145,
+            210,
+            165,
+            180,
+            155,
+            170,
+            160,
+            190,
+            185,
+            195,
+            200,
+            185,
+            175,
+            120,
+            140,
+            150,
+            145,
+            135
+        ],
+        "notes": "Structured limb\u2192precordial order with 2 revisits to Lead_II and V3-V6"
+    }
+]
