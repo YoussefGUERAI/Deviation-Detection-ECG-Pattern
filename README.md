@@ -1,5 +1,5 @@
-## What is a PDFA?
-A **Probabilistic Deterministic Finite Automaton** is a statistical model that:
+## What is a PFSA?
+A **Probabilistic Finite State Automaton** is a statistical model that:
 - Represents states (ECG leads) and transitions between them
 - Captures the probability of moving from one lead to another
 - Predicts next fixations based on current position
@@ -9,83 +9,192 @@ A **Probabilistic Deterministic Finite Automaton** is a statistical model that:
 
 ---
 
-## Step 1: Data Preparation & Analysis (COMPLETED)
+## Implementation Overview
 
-### 1.1 Load and Parse Dataset
-**Purpose**: Data ingestion and validation
-
-**Tasks**:
-- Load JSON file with 60 sequences
-- Validate structure (sequences, durations, labels)
-- Separate expert (30) and novice (30) sequences
-
-**Output**: Two clean arrays ready for analysis
+### Files
+- `expert_sample_dataset.json`: 30 expert + 30 novice ECG scanning sequences
+- `transition_matrices.py`: Main PFSA implementation with deviation detection
+- `statistics_report.py`: Aggregate statistical analysis (optional)
 
 ---
 
-### 1.2 Build Transition Matrices ⭐ **CORE STEP**
-**Purpose**: Extract sequential patterns - THIS IS THE PDFA MODEL
+## Key Features Implemented
 
-**Tasks**:
-- Count all Lead_X → Lead_Y transitions across all sequences
-- Build 12×12 count matrices for each class
-- Normalize to probabilities (row sums = 1.0)
+### 1. PFSA Construction with Laplace Smoothing
+**Purpose**: Build probabilistic models from training data
 
-**Example**:
-```
-From Lead_II in expert sequences:
-- Lead_I: 67% (20 out of 30 times)
-- Lead_III: 25% (7 out of 30 times)
-- aVR: 8% (3 out of 30 times)
+**Implementation**:
+```python
+def build_transition_matrix(sequences, leads, alpha=1.0):
+    # Count transitions
+    # Apply Laplace smoothing: (count + alpha) / (total + alpha * num_states)
+    # Returns 12×12 probability matrix
 ```
 
-**Output**: 
-- **Expert transition matrix**: P_expert[12×12]
-- **Novice transition matrix**: P_novice[12×12]
+**Why Laplace Smoothing?**
+- Prevents zero probabilities for unseen transitions
+- More robust generalization from limited training data (30 sequences)
+- Better handling of novel but reasonable patterns
+- Reduces harsh penalties: unseen transitions get ~2-3% probability instead of 0%
 
-**Why both matrices?**
-- To **compare** expert systematic patterns vs novice randomness
-- To **classify** new sequences: which model fits better?
-- To **quantify** behavioral differences statistically
+**Result**:
+- Expert matrix: 144/144 non-zero transitions (100% dense)
+- Novice matrix: 144/144 non-zero transitions (100% dense)
 
 ---
 
-### 1.3 Compute Statistical Metrics
-**Purpose**: Quantify behavioral differences with numbers
+### 2. Normalized Log-Likelihood Classification
+**Purpose**: Length-independent sequence comparison
 
-#### Metric 1: **Transition Entropy** (Predictability)
-- **Measures**: Randomness in transition choices
-- **Formula**: H = -Σ p(x) × log₂(p(x))
-- **Expert**: ~1.5-2.0 bits (LOW = predictable, systematic)
-- **Novice**: ~2.5-3.5 bits (HIGH = unpredictable, random)
-- **Value**: Statistical proof experts are more systematic
+**Implementation**:
+```python
+# Compute per-transition log-likelihood
+expert_ll_norm = expert_ll / num_transitions
+novice_ll_norm = novice_ll / num_transitions
 
-#### Metric 2: **Sequence Diversity** (Strategy Consistency)
-- **Measures**: Number of unique scanning patterns
-- **Expert**: ~45 unique trigrams from 30 sequences (LOW = shared strategy)
-- **Novice**: ~150 unique trigrams from 30 sequences (HIGH = everyone improvising)
-- **Value**: Shows experts learned a common "expert way"
-
-#### Metric 3: **Revisit Rate** (Efficiency)
-- **Measures**: % of transitions returning to already-seen leads
-- **Expert**: ~10-15% (LOW = efficient, purposeful re-checks)
-- **Novice**: ~25-40% (HIGH = getting lost, confusion)
-- **Value**: Distinguishes strategic verification from disorientation
-
-#### Metric 4: **Lead Coverage** (Attention Allocation)
-- **Measures**: Which leads get viewed and for how long
-- **Expert**: 100% coverage of critical leads (Lead_II, V3, V4)
-- **Novice**: ~60% coverage, misses important leads
-- **Value**: Identifies training gaps (what novices skip)
-
-**Output**: Statistical table for research paper:
+# Classification
+ll_ratio = expert_ll_norm - novice_ll_norm
+classification = "Expert-like" if ll_ratio > 0 else "Novice-like"
+confidence = abs(ll_ratio)
 ```
-┌──────────────────┬─────────┬─────────┬─────────┐
-│ Metric           │ Expert  │ Novice  │ p-value │
-├──────────────────┼─────────┼─────────┼─────────┤
-│ Entropy (bits)   │ 1.85    │ 3.12    │ <0.001  │
-│ Unique Patterns  │ 48      │ 156     │ <0.001  │
-│ Revisit Rate (%) │ 12.3    │ 34.7    │ <0.001  │
-│ Critical Cov (%) │ 98.2    │ 62.4    │ <0.001  │
-└──────────────────┴─────────┴─────────┴─────────┘
+
+**Why Normalization?**
+- Removes sequence length bias
+- Fair comparison between sequences of different lengths
+- Confidence score represents "per-transition" deviation
+
+**Confidence Interpretation**:
+- 0-5: Uncertain, borderline
+- 5-10: Moderate confidence
+- 10-15: High confidence
+- 15+: Very high confidence
+
+---
+
+### 3. Detailed Deviation Detection
+**Purpose**: Identify specific problematic transitions
+
+**Features**:
+- Detects suboptimal transitions (user choice ≠ expert preference)
+- Calculates severity levels: HIGH, MEDIUM, LOW, MINIMAL
+- Computes relative quality: how good was your choice vs expert?
+- Provides actionable feedback for each deviation
+
+**Severity Thresholds**:
+```python
+HIGH:    p < 0.01  (less than 1% probability)
+MEDIUM:  p < 0.05  (less than 5% probability)
+LOW:     p < 0.15  (less than 15% probability)
+MINIMAL: p >= 0.15 (15% or higher)
 ```
+
+**Relative Quality**:
+```
+Relative Quality = (actual_probability / expert_preference_prob) × 100%
+```
+- 100%: Perfect match with expert
+- 50-99%: Good choice
+- 10-49%: Suboptimal
+- <10%: Poor choice
+
+---
+
+### 4. Statistical Metrics
+**Purpose**: Multi-dimensional sequence analysis
+
+**Per-Sequence Metrics**:
+- **Sequence length**: Total number of leads scanned
+- **Lead coverage**: % of 12 ECG leads visited
+- **Revisit rate**: % of redundant transitions
+- **Starting lead**: Typical vs unusual starting position
+
+**Output Format**:
+```
+Classification: Expert-like (confidence: 2.01)
+Length: 13 | Coverage: 100% | Revisit rate: 8%
+Suboptimal transitions: 3/12
+```
+
+---
+
+## Example Output
+
+```
+============================================================
+Sequence: advanced_beginner
+============================================================
+Classification: Expert-like (confidence: 2.01)
+Length: 13 | Coverage: 100% | Revisit rate: 8%
+Starting lead: Lead_I (typical)
+Suboptimal transitions: 3/12
+
+Significant Deviations:
+  1. Position 9: V5 → V4
+     Actual: p=0.020 [MEDIUM] | Expert prefers: V6 (p=0.776)
+     Relative quality: 2.6%
+  2. Position 10: V4 → V6
+     Actual: p=0.020 [MEDIUM] | Expert prefers: V5 (p=0.776)
+     Relative quality: 2.6%
+```
+
+---
+
+## Key Improvements Made
+
+### ✅ Laplace Smoothing
+- **Before**: 77% sparse expert matrix, harsh unseen transition penalties
+- **After**: 100% dense matrices, reasonable penalties for rare transitions
+
+### ✅ Length Normalization
+- **Before**: Confidence scores biased by sequence length
+- **After**: Fair per-transition comparison across all sequences
+
+### ✅ Detailed Deviation Analysis
+- **Before**: Binary classification only
+- **After**: Specific feedback on where and why deviations occur
+
+### ✅ Statistical Context
+- **Before**: PFSA classification in isolation
+- **After**: Combined PFSA + efficiency metrics (coverage, revisits)
+
+---
+
+## Running the Code
+
+```bash
+# Main PFSA deviation detection
+python3 transition_matrices.py
+
+# Aggregate statistics (optional)
+python3 statistics_report.py
+```
+
+---
+
+## Use Cases
+
+1. **Real-time Training Feedback**
+   - Analyze trainee ECG scanning patterns
+   - Provide immediate corrective guidance
+   - Track improvement over time
+
+2. **Skill Assessment**
+   - Classify scanning behavior as expert-like or novice-like
+   - Quantify confidence in classification
+   - Identify specific areas for improvement
+
+3. **Pattern Analysis**
+   - Understand expert scanning strategies
+   - Detect common novice mistakes
+   - Design targeted training interventions
+
+---
+
+## Technical Details
+
+**Model Type**: Probabilistic Finite State Automaton (PFSA)
+**Training Data**: 30 expert + 30 novice sequences
+**States**: 12 ECG leads
+**Smoothing**: Laplace (α=1.0)
+**Classification**: Normalized log-likelihood ratio
+**Metrics**: PFSA confidence + statistical features

@@ -2,7 +2,32 @@ import numpy as np
 import json
 from collections import defaultdict
 
-def build_transition_matrix(sequences, leads):
+def calculate_sequence_stats(sequence):
+    """Calculate basic statistics for a single sequence"""
+    unique_leads = len(set(sequence))
+    sequence_length = len(sequence)
+    lead_coverage = unique_leads / 12
+    revisit_rate = (sequence_length - unique_leads) / sequence_length if sequence_length > 0 else 0
+    
+    return {
+        'sequence_length': sequence_length,
+        'unique_leads': unique_leads,
+        'lead_coverage': lead_coverage,
+        'revisit_rate': revisit_rate
+    }
+
+def build_transition_matrix(sequences, leads, alpha=1.0):
+    """
+    Build transition probability matrix with Laplace smoothing
+    
+    Args:
+        sequences: list of sequence dictionaries
+        leads: list of state names
+        alpha: Laplace smoothing parameter (default=1.0)
+    
+    Returns:
+        Smoothed transition probability matrix
+    """
     counts = defaultdict(lambda: defaultdict(int))
     
     for seq in sequences:
@@ -12,15 +37,16 @@ def build_transition_matrix(sequences, leads):
             next_lead = sequence[i + 1]
             counts[current][next_lead] += 1
     
-    # Convert to probability matrix
+    # Convert to probability matrix with Laplace smoothing
     matrix = np.zeros((len(leads), len(leads)))
     lead_to_idx = {lead: i for i, lead in enumerate(leads)}
+    num_states = len(leads)
     
     for i, from_lead in enumerate(leads):
         total = sum(counts[from_lead].values())
-        if total > 0:
-            for j, to_lead in enumerate(leads):
-                matrix[i][j] = counts[from_lead][to_lead] / total
+        for j, to_lead in enumerate(leads):
+            # Laplace smoothing: add alpha to count, add (alpha * num_states) to total
+            matrix[i][j] = (counts[from_lead][to_lead] + alpha) / (total + alpha * num_states)
     
     return matrix
 
@@ -74,11 +100,8 @@ class PFSA:
         
         for i in range(len(sequence) - 1):
             prob = self.get_transition_prob(sequence[i], sequence[i + 1])
-            if prob > 0:
-                log_likelihood += np.log(prob)
-            else:
-                # Assign very low probability to unseen transitions
-                log_likelihood += np.log(1e-10)
+            # With Laplace smoothing, all probabilities are > 0
+            log_likelihood += np.log(prob)
         
         return log_likelihood 
     # Compute how probable a sequence is under this PFSA model
@@ -99,7 +122,7 @@ class PFSA:
         print(f"States: {self.states}")
         print(f"\nTransition Matrix Shape: {self.transition_matrix.shape}")
         print(f"Non-zero transitions: {np.count_nonzero(self.transition_matrix)}")
-        print(f"Sparsity: {1 - np.count_nonzero(self.transition_matrix) / self.transition_matrix.size:.2%}")
+        
 
 # Create PFSA models
 expert_pfsa = PFSA(P_expert, leads, name="Expert")
@@ -108,6 +131,9 @@ novice_pfsa = PFSA(P_novice, leads, name="Novice")
 # Display information
 expert_pfsa.display_info()
 novice_pfsa.display_info()
+
+
+# Up to this point , we built the transition matrices and can compute log-likelihoods for sequences.
 
 # ==================== Deviation Detection ====================
 
@@ -140,23 +166,26 @@ def analyze_transition_deviations(sequence, expert_pfsa):
         best_next_state = expert_pfsa.states[best_next_idx]
         best_prob = all_probs[best_next_idx]
         
-        # Calculate deviation severity
-        if prob > 0:
-            deviation_score = -np.log(prob)  # Lower prob = higher deviation
-            is_unseen = False
-        else:
-            deviation_score = np.inf  # Unseen transition
-            is_unseen = True
+        # Calculate deviation score (lower prob = higher deviation)
+        deviation_score = -np.log(prob)
         
-        # Determine severity level
-        if is_unseen:
-            severity = "CRITICAL"
-        elif prob < 0.01:
-            severity = "HIGH"
-        elif prob < 0.1:
-            severity = "MEDIUM"
+        # Calculate how much worse this choice is compared to expert preference
+        if best_next_state != to_state:
+            prob_ratio = prob / best_prob
+            deviation_magnitude = best_prob - prob
         else:
+            prob_ratio = 1.0
+            deviation_magnitude = 0.0
+        
+        # Determine severity level based on probability
+        if prob < 0.01:
+            severity = "HIGH"
+        elif prob < 0.05:
+            severity = "MEDIUM"
+        elif prob < 0.15:
             severity = "LOW"
+        else:
+            severity = "MINIMAL"
         
         deviations.append({
             'position': i,
@@ -164,9 +193,11 @@ def analyze_transition_deviations(sequence, expert_pfsa):
             'probability': prob,
             'deviation_score': deviation_score,
             'severity': severity,
-            'is_unseen': is_unseen,
             'expert_would_choose': best_next_state,
-            'expert_preference_prob': best_prob
+            'expert_preference_prob': best_prob,
+            'is_suboptimal': (best_next_state != to_state),
+            'prob_ratio': prob_ratio,
+            'deviation_magnitude': deviation_magnitude
         })
     
     return deviations
@@ -193,13 +224,16 @@ def analyze_starting_position(sequence, expert_pfsa):
         'severity': 'LOW' if is_common_start else 'HIGH'
     }
 
-def get_critical_deviations(deviations, top_n=5):
-    """Get the most significant deviations"""
-    # Sort by deviation score (highest first)
-    sorted_devs = sorted(deviations, key=lambda x: x['deviation_score'], reverse=True)
+def get_significant_deviations(deviations, top_n=5):
+    """Get the most significant deviations (only suboptimal choices)"""
+    # Filter only suboptimal transitions
+    suboptimal = [d for d in deviations if d['is_suboptimal']]
+    
+    # Sort by deviation magnitude (how much worse than expert choice)
+    sorted_devs = sorted(suboptimal, key=lambda x: x['deviation_magnitude'], reverse=True)
     return sorted_devs[:top_n]
 
-def detect_deviation(sequence, expert_pfsa, novice_pfsa, threshold_ratio=1.0):
+def detect_deviation(sequence, expert_pfsa, novice_pfsa):
     """
     Detect if a sequence deviates from expert behavior
     
@@ -207,156 +241,140 @@ def detect_deviation(sequence, expert_pfsa, novice_pfsa, threshold_ratio=1.0):
         sequence: list of ECG leads
         expert_pfsa: PFSA trained on expert data
         novice_pfsa: PFSA trained on novice data
-        threshold_ratio: ratio threshold for classification
     
-    Returns:
+    Returns
         dict with classification results
     """
+    # Calculate raw log-likelihoods
     expert_ll = expert_pfsa.compute_sequence_log_likelihood(sequence)
     novice_ll = novice_pfsa.compute_sequence_log_likelihood(sequence)
+    
+    # Normalize by sequence length to remove length bias
+    num_transitions = len(sequence) - 1
+    expert_ll_norm = expert_ll / num_transitions
+    novice_ll_norm = novice_ll / num_transitions
     
     expert_score = expert_pfsa.compute_anomaly_score(sequence)
     novice_score = novice_pfsa.compute_anomaly_score(sequence)
     
-    # Log-likelihood ratio
-    ll_ratio = expert_ll - novice_ll
+    # Use normalized log-likelihood ratio for classification
+    ll_ratio_norm = expert_ll_norm - novice_ll_norm
     
     # Classification: positive ratio means more likely expert
-    is_expert_like = ll_ratio > threshold_ratio
+    is_expert_like = ll_ratio_norm > 0
     
     return {
         'expert_log_likelihood': expert_ll,
         'novice_log_likelihood': novice_ll,
-        'log_likelihood_ratio': ll_ratio,
+        'expert_ll_normalized': expert_ll_norm,
+        'novice_ll_normalized': novice_ll_norm,
+        'log_likelihood_ratio': ll_ratio_norm,
         'expert_anomaly_score': expert_score,
         'novice_anomaly_score': novice_score,
         'classification': 'Expert-like' if is_expert_like else 'Novice-like',
-        'confidence': abs(ll_ratio)
+        'confidence': abs(ll_ratio_norm)
     }
 
-def generate_detailed_deviation_report(sequence, expert_pfsa, seq_id="Unknown"):
+def analyze_sequence(sequence, expert_pfsa, novice_pfsa, seq_id="Unknown"):
     """
-    Generate a comprehensive deviation report for a sequence
+    Unified sequence analysis combining classification and deviation detection
     
     Args:
         sequence: list of ECG leads
         expert_pfsa: PFSA trained on expert data
+        novice_pfsa: PFSA trained on novice data
         seq_id: identifier for the sequence
     
     Returns:
-        Prints detailed report and returns analysis data
+        Combined analysis results
     """
-    print(f"\n{'='*70}")
-    print(f"DETAILED DEVIATION REPORT: {seq_id}")
-    print(f"{'='*70}")
+    # Classification
+    result = detect_deviation(sequence, expert_pfsa, novice_pfsa)
     
-    # Analyze starting position
-    start_analysis = analyze_starting_position(sequence, expert_pfsa)
-    print(f"\n📍 STARTING POSITION ANALYSIS:")
-    print(f"   Started with: {start_analysis['starting_lead']}")
-    print(f"   Typical expert starts: {', '.join(start_analysis['expected_starts'])}")
-    if not start_analysis['is_typical_start']:
-        print(f"   ⚠️  WARNING: Unusual starting position (Severity: {start_analysis['severity']})")
-    else:
-        print(f"   ✅ Good: Started with a typical expert lead")
-    
-    # Analyze all transitions
+    # Deviation analysis
     deviations = analyze_transition_deviations(sequence, expert_pfsa)
+    significant = get_significant_deviations(deviations, top_n=5)
+    start_analysis = analyze_starting_position(sequence, expert_pfsa)
     
-    # Get critical deviations
-    critical = get_critical_deviations(deviations, top_n=5)
+    # Statistical features
+    stats = calculate_sequence_stats(sequence)
     
-    print(f"\n🔍 CRITICAL DEVIATIONS (Top 5 Most Significant):")
-    print(f"{'─'*70}")
-    
-    for idx, dev in enumerate(critical, 1):
-        print(f"\n   {idx}. Position {dev['position']}: {dev['transition']}")
-        print(f"      Severity: {dev['severity']}")
-        if dev['is_unseen']:
-            print(f"      ❌ NEVER seen in expert training data!")
-        else:
-            print(f"      Probability: {dev['probability']:.4f}")
-            print(f"      Deviation Score: {dev['deviation_score']:.2f}")
-        print(f"      💡 Expert would typically choose: {dev['expert_would_choose']} (prob: {dev['expert_preference_prob']:.4f})")
-    
-    # Summary statistics
+    # Calculate deviation stats
     total_transitions = len(deviations)
-    critical_count = sum(1 for d in deviations if d['severity'] in ['CRITICAL', 'HIGH'])
-    unseen_count = sum(1 for d in deviations if d['is_unseen'])
-    avg_prob = np.mean([d['probability'] for d in deviations if not d['is_unseen']])
+    suboptimal_count = sum(1 for d in deviations if d['is_suboptimal'])
     
-    print(f"\n📊 SUMMARY STATISTICS:")
-    print(f"   Total transitions: {total_transitions}")
-    print(f"   Critical/High severity: {critical_count} ({critical_count/total_transitions*100:.1f}%)")
-    print(f"   Unseen in expert data: {unseen_count}")
-    print(f"   Average transition probability: {avg_prob:.4f}")
+    # Print comprehensive report
+    print(f"\n{'='*60}")
+    print(f"Sequence: {seq_id}")
+    print(f"{'='*60}")
+    print(f"Classification: {result['classification']} (confidence: {result['confidence']:.2f})")
+    print(f"Length: {stats['sequence_length']} | Coverage: {stats['lead_coverage']*100:.0f}% | Revisit rate: {stats['revisit_rate']*100:.0f}%")
+    print(f"Starting lead: {start_analysis['starting_lead']} ({'typical' if start_analysis['is_typical_start'] else 'unusual'})")
+    print(f"Suboptimal transitions: {suboptimal_count}/{total_transitions}")
     
-    print(f"\n{'='*70}\n")
+    if len(significant) > 0:
+        print(f"\nSignificant Deviations:")
+        for idx, dev in enumerate(significant, 1):
+            print(f"  {idx}. Position {dev['position']}: {dev['transition']}")
+            print(f"     Actual: p={dev['probability']:.3f} [{dev['severity']}] | Expert prefers: {dev['expert_would_choose']} (p={dev['expert_preference_prob']:.3f})")
+            print(f"     Your choice is {dev['prob_ratio']*100:.1f}% as likely as expert's preferred choice.")
+    else:
+        print(f"\nNo significant deviations detected!")
+    
+    print()
     
     return {
-        'start_analysis': start_analysis,
-        'deviations': deviations,
-        'critical_deviations': critical,
-        'stats': {
-            'total_transitions': total_transitions,
-            'critical_count': critical_count,
-            'unseen_count': unseen_count,
-            'avg_probability': avg_prob
-        }
+        'classification': result['classification'],
+        'confidence': result['confidence'],
+        'suboptimal_count': suboptimal_count,
+        'total_transitions': total_transitions,
+        'significant_deviations': significant,
+        'stats': stats
     }
 
-def analyze_dataset(sequences, label, expert_pfsa, novice_pfsa):
-    """Analyze a dataset of sequences"""
-    print(f"\n{'='*60}")
-    print(f"Analyzing {label} Sequences")
-    print(f"{'='*60}")
-    
-    results = []
-    for seq_data in sequences[:5]:  # Analyze first 5 as examples
-        seq = seq_data['sequence']
-        result = detect_deviation(seq, expert_pfsa, novice_pfsa)
-        results.append(result)
-        
-        print(f"\nSequence ID: {seq_data['id']}")
-        print(f"  True Label: {seq_data['label']}")
-        print(f"  Classification: {result['classification']}")
-        print(f"  LL Ratio: {result['log_likelihood_ratio']:.2f}")
-        print(f"  Expert LL: {result['expert_log_likelihood']:.2f}")
-        print(f"  Novice LL: {result['novice_log_likelihood']:.2f}")
-    
-    return results
-
-# ==================== Analysis ====================
+# ==================== Test with New Challenging Sequences ====================
 
 print("\n" + "="*60)
-print("PFSA-Based ECG Pattern Deviation Detection")
+print("TESTING SOME CHALLENGING SEQUENCES")
 print("="*60)
 
-# Analyze expert sequences
-expert_results = analyze_dataset(expert_seqs, "Expert", expert_pfsa, novice_pfsa)
+# Advanced Beginner: Mostly follows expert pattern but makes a few mistakes
+advanced_beginner = ["Lead_I", "Lead_II", "Lead_III", "aVR", "aVL", "aVF", 
+                     "V1", "V2", "V3", "V5", "V4", "V6", "Lead_II"]
+# Mistake: V3 → V5 instead of V3 → V4
 
-# Analyze novice sequences  
-novice_results = analyze_dataset(novice_seqs, "Novice", expert_pfsa, novice_pfsa)
+# Intermediate: Systematic but with some inefficient revisits
+intermediate = ["Lead_II", "Lead_I", "Lead_III", "aVR", "aVL", "aVF",
+                "V1", "V2", "V3", "V4", "V5", "V6", 
+                "Lead_II", "aVL", "V3", "V4"]
+# Has extra revisits but follows general pattern
 
-print("\n" + "="*60)
-print("PFSA models built successfully!")
-print("="*60)
+# Semi-Expert: Perfect start but loses structure in precordial leads
+semi_expert = ["Lead_I", "Lead_II", "Lead_III", "aVR", "aVL", "aVF",
+               "V1", "V3", "V2", "V4", "V6", "V5"]
+# Out of order in V-leads: V3 before V2, V6 before V5
 
-# ==================== Detailed Deviation Analysis ====================
+# Confused: Mixes limb and precordial leads chaotically
+confused = ["Lead_I", "V1", "Lead_II", "V3", "aVR", "V5", 
+            "Lead_III", "V2", "aVL", "V4", "aVF", "V6"]
+# Constantly jumping between limb and precordial
 
-print("\n" + "="*70)
-print("DETAILED DEVIATION ANALYSIS")
-print("="*70)
+# Almost Expert: Perfect except one subtle error
+almost_expert = ["Lead_I", "Lead_II", "Lead_III", "aVR", "aVL", "aVF",
+                 "V1", "V2", "V3", "V4", "V5", "V6", "aVF", "V5"]
+# Only issue: revisits at end (aVF, V5) instead of typical Lead_II
 
-# Analyze a few example sequences in detail
-print("\n🔬 EXPERT SEQUENCE EXAMPLE:")
-generate_detailed_deviation_report(expert_seqs[0]['sequence'], expert_pfsa, expert_seqs[0]['id'])
+print("\nADVANCED BEGINNER:")
+analyze_sequence(advanced_beginner, expert_pfsa, novice_pfsa, "advanced_beginner")
 
-print("\n🔬 NOVICE SEQUENCE EXAMPLES:")
-# Analyze first 2 novice sequences to show different deviation patterns
-for i in range(2):
-    generate_detailed_deviation_report(novice_seqs[i]['sequence'], expert_pfsa, novice_seqs[i]['id'])
+print("\nINTERMEDIATE:")
+analyze_sequence(intermediate, expert_pfsa, novice_pfsa, "intermediate")
 
-print("\n" + "="*70)
-print("Analysis Complete!")
-print("="*70)
+print("\nSEMI-EXPERT:")
+analyze_sequence(semi_expert, expert_pfsa, novice_pfsa, "semi_expert")
+
+print("\nCONFUSED:")
+analyze_sequence(confused, expert_pfsa, novice_pfsa, "confused")
+
+print("\nALMOST EXPERT:")
+analyze_sequence(almost_expert, expert_pfsa, novice_pfsa, "almost_expert")

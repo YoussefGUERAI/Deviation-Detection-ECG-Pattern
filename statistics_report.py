@@ -45,3 +45,5 @@ print("Expert revisit rate:", expert_metrics['revisit_rate'])
 print("Novice revisit rate:", novice_metrics['revisit_rate'])
 print("Expert average sequence length:", expert_metrics['avg_length'])
 print("Novice average sequence length:", novice_metrics['avg_length'])
+
+
