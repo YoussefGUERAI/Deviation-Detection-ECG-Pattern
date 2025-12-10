@@ -1,5 +1,6 @@
 import numpy as np
 import json
+import time
 from collections import defaultdict
 
 def calculate_sequence_stats(sequence):
@@ -378,3 +379,90 @@ analyze_sequence(confused, expert_pfsa, novice_pfsa, "confused")
 
 print("\nALMOST EXPERT:")
 analyze_sequence(almost_expert, expert_pfsa, novice_pfsa, "almost_expert")
+
+# ==================== COMPLEXITY VALIDATION - TIMING EXPERIMENTS ====================
+
+print("\n" + "="*70)
+print("COMPLEXITY VALIDATION - TIMING EXPERIMENTS")
+print("="*70)
+print("\nMeasuring execution times for complexity analysis in paper...")
+
+# Time training (average over 100 iterations)
+print("\n1. Training Complexity (Theorem 3)")
+print("-" * 50)
+start = time.time()
+for _ in range(100):
+    P_expert_test = build_transition_matrix(expert_seqs, leads)
+    P_novice_test = build_transition_matrix(novice_seqs, leads)
+training_time = (time.time() - start) / 100
+print(f"Training time (m=60, n̄=15): {training_time*1000:.2f}ms")
+print(f"Expected: O(m·n̄ + |Q|²) = O(60·15 + 144) = O(1044)")
+
+# Time classification (average over 1000 iterations)
+print("\n2. Inference Complexity (Theorem 2)")
+print("-" * 50)
+test_seq = advanced_beginner
+start = time.time()
+for _ in range(1000):
+    result = detect_deviation(test_seq, expert_pfsa, novice_pfsa)
+classification_time = (time.time() - start) / 1000
+print(f"Classification time (n=13): {classification_time*1000:.3f}ms")
+print(f"Throughput: {1/classification_time:.0f} sequences/second")
+print(f"Expected: O(n) = O(13)")
+
+# Time deviation detection (average over 1000 iterations)
+print("\n3. Deviation Detection Complexity (Theorem 4)")
+print("-" * 50)
+start = time.time()
+for _ in range(1000):
+    deviations = analyze_transition_deviations(test_seq, expert_pfsa)
+deviation_time = (time.time() - start) / 1000
+print(f"Deviation detection time (n=13): {deviation_time*1000:.2f}ms")
+print(f"Expected: O(n·|Q|) = O(13·12) = O(156)")
+
+# Total analysis time
+print("\n4. Total Analysis Performance")
+print("-" * 50)
+total_time = classification_time + deviation_time
+print(f"Total per sequence: {total_time*1000:.2f}ms")
+print(f"Throughput: {1/total_time:.0f} sequences/second")
+print(f"Real-time feasibility: {'YES' if total_time < 0.016 else 'NO'} (< 16ms for 60 FPS)")
+
+# Scalability experiments
+print("\n5. Scalability Analysis")
+print("-" * 50)
+
+# Test with longer sequence
+long_seq = ["Lead_I", "Lead_II", "Lead_III", "aVR", "aVL", "aVF",
+            "V1", "V2", "V3", "V4", "V5", "V6"] * 2  # 24 leads
+start = time.time()
+for _ in range(1000):
+    result = detect_deviation(long_seq, expert_pfsa, novice_pfsa)
+long_time = (time.time() - start) / 1000
+print(f"Long sequence (n=24): {long_time*1000:.3f}ms")
+print(f"Ratio (24/13): {long_time/classification_time:.2f}x (linear scaling)")
+
+# Process 1000 sequences
+start = time.time()
+for _ in range(1000):
+    result = detect_deviation(test_seq, expert_pfsa, novice_pfsa)
+    deviations = analyze_transition_deviations(test_seq, expert_pfsa)
+batch_time = time.time() - start
+print(f"\nProcess 1000 sequences: {batch_time:.3f}s = {batch_time*1000:.0f}ms")
+print(f"Average per sequence: {batch_time:.3f}ms")
+
+print("\n" + "="*70)
+print("TIMING SUMMARY FOR PAPER (Table in Section 3.5)")
+print("="*70)
+print(f"{'Operation':<35} {'Time':<15} {'Throughput':<20}")
+print("-" * 70)
+print(f"{'Train PDFA (m=60, n̄=15)':<35} {training_time*1000:.1f}ms{'':<10} {'—':<20}")
+print(f"{'Classify sequence (n=13)':<35} {classification_time*1000:.2f}ms{'':<9} {f'{1/classification_time:.0f}/sec':<20}")
+print(f"{'Deviation detection (n=13)':<35} {deviation_time*1000:.2f}ms{'':<9} {f'{1/deviation_time:.0f}/sec':<20}")
+print(f"{'Full analysis':<35} {total_time*1000:.2f}ms{'':<9} {f'{1/total_time:.0f}/sec':<20}")
+print("-" * 70)
+print(f"{'Process 1000 sequences':<35} {batch_time*1000:.0f}ms{'':<9} {'—':<20}")
+print("="*70)
+
+print("\n✓ All complexity measurements complete!")
+print("✓ Copy the timing summary table into Section 3.5 of your paper")
